@@ -18,6 +18,9 @@ package cluster
 
 import (
 	"fmt"
+	"io/ioutil"
+	"os"
+	"path/filepath"
 
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
@@ -37,6 +40,10 @@ import (
 type ObjectMover interface {
 	// Move moves all the Cluster API objects existing in a namespace (or from all the namespaces if empty) to a target management cluster.
 	Move(namespace string, toCluster Client, dryRun bool) error
+	// Save saves all the Cluster API objects existing in a namespace (or from all the namespaces if empty) to a target management cluster.
+	Save(namespace string) error
+	// Restore restores all the Cluster API objects existing in a namespace (or from all the namespaces if empty) to a target management cluster.
+	Restore(namespace string) error
 }
 
 // objectMover implements the ObjectMover interface.
@@ -48,6 +55,120 @@ type objectMover struct {
 
 // ensure objectMover implements the ObjectMover interface.
 var _ ObjectMover = &objectMover{}
+
+func (o *objectMover) Save(namespace string) error {
+	log := logf.Log
+	log.Info("Performing save...")
+	// o.dryRun = dryRun
+	// if o.dryRun {
+	// 	log.Info("********************************************************")
+	// 	log.Info("This is a dry-run save, will not perform any real action")
+	// 	log.Info("********************************************************")
+	// }
+
+	objectGraph := newObjectGraph(o.fromProxy)
+
+	// checks that all the required providers in place in the target cluster.
+	// if !o.dryRun {
+	// 	if err := o.checkTargetProviders(namespace, toCluster.ProviderInventory()); err != nil {
+	// 		return err
+	// 	}
+	// }
+
+	// Gets all the types defines by the CRDs installed by clusterctl plus the ConfigMap/Secret core types.
+	err := objectGraph.getDiscoveryTypes()
+	if err != nil {
+		return err
+	}
+
+	// Discovery the object graph for the selected types:
+	// - Nodes are defined the Kubernetes objects (Clusters, Machines etc.) identified during the discovery process.
+	// - Edges are derived by the OwnerReferences between nodes.
+	if err := objectGraph.Discovery(namespace); err != nil {
+		return err
+	}
+
+	// Checks if Cluster API has already completed the provisioning of the infrastructure for the objects involved in the move operation.
+	// This is required because if the infrastructure is provisioned, then we can reasonably assume that the objects we are moving are
+	// not currently waiting for long-running reconciliation loops, and so we can safely rely on the pause field on the Cluster object
+	// for blocking any further object reconciliation on the source objects.
+	// if err := o.checkProvisioningCompleted(objectGraph); err != nil {
+	// 	return err
+	// }
+
+	// Check whether nodes are not included in GVK considered for move
+	objectGraph.checkVirtualNode()
+
+	// Move the objects to the target cluster.
+	// var proxy Proxy
+	// if !o.dryRun {
+	// 	proxy = toCluster.Proxy()
+	// }
+
+	//if err := o.move(objectGraph, proxy); err != nil {
+	if err := o.save(objectGraph); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (o *objectMover) Restore(namespace string) error {
+	log := logf.Log
+	log.Info("Performing restore...")
+	// o.dryRun = dryRun
+	// if o.dryRun {
+	// 	log.Info("********************************************************")
+	// 	log.Info("This is a dry-run save, will not perform any real action")
+	// 	log.Info("********************************************************")
+	// }
+
+	objectGraph := newObjectGraph(o.fromProxy)
+
+	// checks that all the required providers in place in the target cluster.
+	// if !o.dryRun {
+	// 	if err := o.checkTargetProviders(namespace, toCluster.ProviderInventory()); err != nil {
+	// 		return err
+	// 	}
+	// }
+
+	// Gets all the types defines by the CRDs installed by clusterctl plus the ConfigMap/Secret core types.
+	err := objectGraph.getDiscoveryTypes()
+	if err != nil {
+		return err
+	}
+
+	// Discovery the object graph for the selected types:
+	// - Nodes are defined the Kubernetes objects (Clusters, Machines etc.) identified during the discovery process.
+	// - Edges are derived by the OwnerReferences between nodes.
+	if err := objectGraph.Discovery(namespace); err != nil {
+		return err
+	}
+
+	// Checks if Cluster API has already completed the provisioning of the infrastructure for the objects involved in the move operation.
+	// This is required because if the infrastructure is provisioned, then we can reasonably assume that the objects we are moving are
+	// not currently waiting for long-running reconciliation loops, and so we can safely rely on the pause field on the Cluster object
+	// for blocking any further object reconciliation on the source objects.
+	// if err := o.checkProvisioningCompleted(objectGraph); err != nil {
+	// 	return err
+	// }
+
+	// Check whether nodes are not included in GVK considered for move
+	objectGraph.checkVirtualNode()
+
+	// Move the objects to the target cluster.
+	// var proxy Proxy
+	// if !o.dryRun {
+	// 	proxy = toCluster.Proxy()
+	// }
+
+	//if err := o.move(objectGraph, proxy); err != nil {
+	if err := o.restore(objectGraph); err != nil {
+		return err
+	}
+
+	return nil
+}
 
 func (o *objectMover) Move(namespace string, toCluster Client, dryRun bool) error {
 	log := logf.Log
@@ -250,6 +371,108 @@ func (o *objectMover) move(graph *objectGraph, toProxy Proxy) error {
 	// Reset the pause field on the Cluster object in the target management cluster, so the controllers start reconciling it.
 	log.V(1).Info("Resuming the target cluster")
 	if err := setClusterPause(toProxy, clusters, false, o.dryRun); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (o *objectMover) save(graph *objectGraph) error {
+	log := logf.Log
+
+	clusters := graph.getClusters()
+	log.Info("Moving Cluster API objects", "Clusters", len(clusters))
+
+	// Sets the pause field on the Cluster object in the source management cluster, so the controllers stop reconciling it.
+	log.V(1).Info("Pausing the source cluster")
+	if err := setClusterPause(o.fromProxy, clusters, true, o.dryRun); err != nil {
+		return err
+	}
+
+	// Ensure all the expected target namespaces are in place before creating objects.
+	// log.V(1).Info("Creating target namespaces, if missing")
+	// if err := o.ensureNamespaces(graph, toProxy); err != nil {
+	// 	return err
+	// }
+
+	// Define the move sequence by processing the ownerReference chain, so we ensure that a Kubernetes object is moved only after its owners.
+	// The sequence is bases on object graph nodes, each one representing a Kubernetes object; nodes are grouped, so bulk of nodes can be moved in parallel. e.g.
+	// - All the Clusters should be moved first (group 1, processed in parallel)
+	// - All the MachineDeployments should be moved second (group 1, processed in parallel)
+	// - then all the MachineSets, then all the Machines, etc.
+	moveSequence := getMoveSequence(graph)
+
+	// Create all objects group by group, ensuring all the ownerReferences are re-created.
+	log.Info("Creating objects in the target cluster")
+	for groupIndex := 0; groupIndex < len(moveSequence.groups); groupIndex++ {
+		//if err := o.createGroup(moveSequence.getGroup(groupIndex), toProxy); err != nil {
+		if err := o.saveGroup(moveSequence.getGroup(groupIndex)); err != nil {
+			return err
+		}
+	}
+
+	// Delete all objects group by group in reverse order.
+	// log.Info("Deleting objects from the source cluster")
+	// for groupIndex := len(moveSequence.groups) - 1; groupIndex >= 0; groupIndex-- {
+	// 	if err := o.deleteGroup(moveSequence.getGroup(groupIndex)); err != nil {
+	// 		return err
+	// 	}
+	// }
+
+	// Reset the pause field on the Cluster object in the target management cluster, so the controllers start reconciling it.
+	log.V(1).Info("Resuming the source cluster")
+	if err := setClusterPause(o.fromProxy, clusters, false, o.dryRun); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (o *objectMover) restore(graph *objectGraph) error {
+	log := logf.Log
+
+	clusters := graph.getClusters()
+	log.Info("Moving Cluster API objects", "Clusters", len(clusters))
+
+	// Sets the pause field on the Cluster object in the source management cluster, so the controllers stop reconciling it.
+	log.V(1).Info("Pausing the source cluster")
+	if err := setClusterPause(o.fromProxy, clusters, true, o.dryRun); err != nil {
+		return err
+	}
+
+	// Ensure all the expected target namespaces are in place before creating objects.
+	// log.V(1).Info("Creating target namespaces, if missing")
+	// if err := o.ensureNamespaces(graph, toProxy); err != nil {
+	// 	return err
+	// }
+
+	// Define the move sequence by processing the ownerReference chain, so we ensure that a Kubernetes object is moved only after its owners.
+	// The sequence is bases on object graph nodes, each one representing a Kubernetes object; nodes are grouped, so bulk of nodes can be moved in parallel. e.g.
+	// - All the Clusters should be moved first (group 1, processed in parallel)
+	// - All the MachineDeployments should be moved second (group 1, processed in parallel)
+	// - then all the MachineSets, then all the Machines, etc.
+	moveSequence := getMoveSequence(graph)
+
+	// Create all objects group by group, ensuring all the ownerReferences are re-created.
+	log.Info("Creating objects in the target cluster")
+	for groupIndex := 0; groupIndex < len(moveSequence.groups); groupIndex++ {
+		//if err := o.createGroup(moveSequence.getGroup(groupIndex), toProxy); err != nil {
+		if err := o.saveGroup(moveSequence.getGroup(groupIndex)); err != nil {
+			return err
+		}
+	}
+
+	// Delete all objects group by group in reverse order.
+	// log.Info("Deleting objects from the source cluster")
+	// for groupIndex := len(moveSequence.groups) - 1; groupIndex >= 0; groupIndex-- {
+	// 	if err := o.deleteGroup(moveSequence.getGroup(groupIndex)); err != nil {
+	// 		return err
+	// 	}
+	// }
+
+	// Reset the pause field on the Cluster object in the target management cluster, so the controllers start reconciling it.
+	log.V(1).Info("Resuming the source cluster")
+	if err := setClusterPause(o.fromProxy, clusters, false, o.dryRun); err != nil {
 		return err
 	}
 
@@ -502,6 +725,54 @@ func (o *objectMover) createGroup(group moveGroup, toProxy Proxy) error {
 	return nil
 }
 
+func (o *objectMover) saveGroup(group moveGroup) error {
+	createTargetObjectBackoff := newWriteBackoff()
+	errList := []error{}
+	for i := range group {
+		nodeToCreate := group[i]
+
+		// Creates the Kubernetes object corresponding to the nodeToCreate.
+		// Nb. The operation is wrapped in a retry loop to make move more resilient to unexpected conditions.
+		err := retryWithExponentialBackoff(createTargetObjectBackoff, func() error {
+			//return o.createTargetObject(nodeToCreate)
+			return o.saveTargetObject(nodeToCreate)
+		})
+		if err != nil {
+			errList = append(errList, err)
+		}
+	}
+
+	if len(errList) > 0 {
+		return kerrors.NewAggregate(errList)
+	}
+
+	return nil
+}
+
+func (o *objectMover) restoreGroup(group moveGroup) error {
+	createTargetObjectBackoff := newWriteBackoff()
+	errList := []error{}
+	for i := range group {
+		nodeToCreate := group[i]
+
+		// Creates the Kubernetes object corresponding to the nodeToCreate.
+		// Nb. The operation is wrapped in a retry loop to make move more resilient to unexpected conditions.
+		err := retryWithExponentialBackoff(createTargetObjectBackoff, func() error {
+			//return o.createTargetObject(nodeToCreate)
+			return o.restoreTargetObject(nodeToCreate)
+		})
+		if err != nil {
+			errList = append(errList, err)
+		}
+	}
+
+	if len(errList) > 0 {
+		return kerrors.NewAggregate(errList)
+	}
+
+	return nil
+}
+
 // createTargetObject creates the Kubernetes object in the target Management cluster corresponding to the object graph node, taking care of restoring the OwnerReference with the owner nodes, if any.
 func (o *objectMover) createTargetObject(nodeToCreate *node, toProxy Proxy) error {
 	log := logf.Log
@@ -561,6 +832,248 @@ func (o *objectMover) createTargetObject(nodeToCreate *node, toProxy Proxy) erro
 
 	// Creates the targetObj into the target management cluster.
 	cTo, err := toProxy.NewClient()
+	if err != nil {
+		return err
+	}
+
+	if err := cTo.Create(ctx, obj); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return errors.Wrapf(err, "error creating %q %s/%s",
+				obj.GroupVersionKind(), obj.GetNamespace(), obj.GetName())
+		}
+
+		// If the object already exists, try to update it.
+		// Nb. This should not happen, but it is supported to make move more resilient to unexpected interrupt/restarts of the move process.
+		log.V(5).Info("Object already exists, updating", nodeToCreate.identity.Kind, nodeToCreate.identity.Name, "Namespace", nodeToCreate.identity.Namespace)
+
+		// Retrieve the UID and the resource version for the update.
+		existingTargetObj := &unstructured.Unstructured{}
+		existingTargetObj.SetAPIVersion(obj.GetAPIVersion())
+		existingTargetObj.SetKind(obj.GetKind())
+		if err := cTo.Get(ctx, objKey, existingTargetObj); err != nil {
+			return errors.Wrapf(err, "error reading resource for %q %s/%s",
+				existingTargetObj.GroupVersionKind(), existingTargetObj.GetNamespace(), existingTargetObj.GetName())
+		}
+
+		obj.SetUID(existingTargetObj.GetUID())
+		obj.SetResourceVersion(existingTargetObj.GetResourceVersion())
+		if err := cTo.Update(ctx, obj); err != nil {
+			return errors.Wrapf(err, "error updating %q %s/%s",
+				obj.GroupVersionKind(), obj.GetNamespace(), obj.GetName())
+		}
+	}
+
+	// Stores the newUID assigned to the newly created object.
+	nodeToCreate.newUID = obj.GetUID()
+
+	return nil
+}
+
+func (o *objectMover) saveTargetObject(nodeToCreate *node) error {
+	log := logf.Log
+	log.V(1).Info("Creating", nodeToCreate.identity.Kind, nodeToCreate.identity.Name, "Namespace", nodeToCreate.identity.Namespace)
+
+	// if o.dryRun {
+	// 	return nil
+	// }
+
+	cFrom, err := o.fromProxy.NewClient()
+	if err != nil {
+		return err
+	}
+
+	// Get the source object
+	obj := &unstructured.Unstructured{}
+	obj.SetAPIVersion(nodeToCreate.identity.APIVersion)
+	obj.SetKind(nodeToCreate.identity.Kind)
+	objKey := client.ObjectKey{
+		Namespace: nodeToCreate.identity.Namespace,
+		Name:      nodeToCreate.identity.Name,
+	}
+
+	if err := cFrom.Get(ctx, objKey, obj); err != nil {
+		return errors.Wrapf(err, "error reading %q %s/%s",
+			obj.GroupVersionKind(), obj.GetNamespace(), obj.GetName())
+	}
+
+	// New objects cannot have a specified resource version. Clear it out.
+	obj.SetResourceVersion("")
+
+	// Removes current OwnerReferences
+	obj.SetOwnerReferences(nil)
+
+	// Recreate all the OwnerReferences using the newUID of the owner nodes.
+	if len(nodeToCreate.owners) > 0 {
+		ownerRefs := []metav1.OwnerReference{}
+		for ownerNode := range nodeToCreate.owners {
+			ownerRef := metav1.OwnerReference{
+				APIVersion: ownerNode.identity.APIVersion,
+				Kind:       ownerNode.identity.Kind,
+				Name:       ownerNode.identity.Name,
+				UID:        ownerNode.newUID, // Use the owner's newUID read from the target management cluster (instead of the UID read during discovery).
+			}
+
+			// Restores the attributes of the OwnerReference.
+			if attributes, ok := nodeToCreate.owners[ownerNode]; ok {
+				ownerRef.Controller = attributes.Controller
+				ownerRef.BlockOwnerDeletion = attributes.BlockOwnerDeletion
+			}
+
+			ownerRefs = append(ownerRefs, ownerRef)
+		}
+		obj.SetOwnerReferences(ownerRefs)
+	}
+
+	byObj, err := obj.MarshalJSON()
+	if err != nil {
+		return err
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+
+	directoryBin := filepath.Join(homeDir, ".tanzu", "tce", "objects")
+	err = os.MkdirAll(directoryBin, 0755)
+	if err != nil {
+		return err
+	}
+
+	filenameObj := nodeToCreate.identity.Kind + "_" + nodeToCreate.identity.Name + "_" + nodeToCreate.identity.Namespace
+	objectFile := filepath.Join(directoryBin, filenameObj)
+
+	err = ioutil.WriteFile(objectFile, byObj, 0644)
+	if err != nil {
+		return err
+	}
+
+	// Creates the targetObj into the target management cluster.
+	// cTo, err := toProxy.NewClient()
+	// if err != nil {
+	// 	return err
+	// }
+
+	// if err := cTo.Create(ctx, obj); err != nil {
+	// 	if !apierrors.IsAlreadyExists(err) {
+	// 		return errors.Wrapf(err, "error creating %q %s/%s",
+	// 			obj.GroupVersionKind(), obj.GetNamespace(), obj.GetName())
+	// 	}
+
+	// 	// If the object already exists, try to update it.
+	// 	// Nb. This should not happen, but it is supported to make move more resilient to unexpected interrupt/restarts of the move process.
+	// 	log.V(5).Info("Object already exists, updating", nodeToCreate.identity.Kind, nodeToCreate.identity.Name, "Namespace", nodeToCreate.identity.Namespace)
+
+	// 	// Retrieve the UID and the resource version for the update.
+	// 	existingTargetObj := &unstructured.Unstructured{}
+	// 	existingTargetObj.SetAPIVersion(obj.GetAPIVersion())
+	// 	existingTargetObj.SetKind(obj.GetKind())
+	// 	if err := cTo.Get(ctx, objKey, existingTargetObj); err != nil {
+	// 		return errors.Wrapf(err, "error reading resource for %q %s/%s",
+	// 			existingTargetObj.GroupVersionKind(), existingTargetObj.GetNamespace(), existingTargetObj.GetName())
+	// 	}
+
+	// 	obj.SetUID(existingTargetObj.GetUID())
+	// 	obj.SetResourceVersion(existingTargetObj.GetResourceVersion())
+	// 	if err := cTo.Update(ctx, obj); err != nil {
+	// 		return errors.Wrapf(err, "error updating %q %s/%s",
+	// 			obj.GroupVersionKind(), obj.GetNamespace(), obj.GetName())
+	// 	}
+	// }
+
+	// // Stores the newUID assigned to the newly created object.
+	// nodeToCreate.newUID = obj.GetUID()
+
+	return nil
+}
+
+func (o *objectMover) restoreTargetObject(nodeToCreate *node) error {
+	log := logf.Log
+	log.V(1).Info("Creating", nodeToCreate.identity.Kind, nodeToCreate.identity.Name, "Namespace", nodeToCreate.identity.Namespace)
+
+	// if o.dryRun {
+	// 	return nil
+	// }
+
+	// cFrom, err := o.fromProxy.NewClient()
+	// if err != nil {
+	// 	return err
+	// }
+
+	// // Get the source object
+	// obj := &unstructured.Unstructured{}
+	// obj.SetAPIVersion(nodeToCreate.identity.APIVersion)
+	// obj.SetKind(nodeToCreate.identity.Kind)
+	// objKey := client.ObjectKey{
+	// 	Namespace: nodeToCreate.identity.Namespace,
+	// 	Name:      nodeToCreate.identity.Name,
+	// }
+
+	// if err := cFrom.Get(ctx, objKey, obj); err != nil {
+	// 	return errors.Wrapf(err, "error reading %q %s/%s",
+	// 		obj.GroupVersionKind(), obj.GetNamespace(), obj.GetName())
+	// }
+
+	// // New objects cannot have a specified resource version. Clear it out.
+	// obj.SetResourceVersion("")
+
+	// // Removes current OwnerReferences
+	// obj.SetOwnerReferences(nil)
+
+	// // Recreate all the OwnerReferences using the newUID of the owner nodes.
+	// if len(nodeToCreate.owners) > 0 {
+	// 	ownerRefs := []metav1.OwnerReference{}
+	// 	for ownerNode := range nodeToCreate.owners {
+	// 		ownerRef := metav1.OwnerReference{
+	// 			APIVersion: ownerNode.identity.APIVersion,
+	// 			Kind:       ownerNode.identity.Kind,
+	// 			Name:       ownerNode.identity.Name,
+	// 			UID:        ownerNode.newUID, // Use the owner's newUID read from the target management cluster (instead of the UID read during discovery).
+	// 		}
+
+	// 		// Restores the attributes of the OwnerReference.
+	// 		if attributes, ok := nodeToCreate.owners[ownerNode]; ok {
+	// 			ownerRef.Controller = attributes.Controller
+	// 			ownerRef.BlockOwnerDeletion = attributes.BlockOwnerDeletion
+	// 		}
+
+	// 		ownerRefs = append(ownerRefs, ownerRef)
+	// 	}
+	// 	obj.SetOwnerReferences(ownerRefs)
+	// }
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+
+	directoryBin := filepath.Join(homeDir, ".tanzu", "tce", "objects")
+	err = os.MkdirAll(directoryBin, 0755)
+	if err != nil {
+		return err
+	}
+
+	filenameObj := nodeToCreate.identity.Kind + "_" + nodeToCreate.identity.Name + "_" + nodeToCreate.identity.Namespace
+	objectFile := filepath.Join(directoryBin, filenameObj)
+
+	byObj, err := ioutil.ReadFile(objectFile)
+	if err != nil {
+		return err
+	}
+
+	obj := &unstructured.Unstructured{}
+	err = obj.UnmarshalJSON(byObj)
+	if err != nil {
+		return err
+	}
+
+	objKey := client.ObjectKey{
+		Namespace: nodeToCreate.identity.Namespace,
+		Name:      nodeToCreate.identity.Name,
+	}
+
+	// Creates the targetObj into the target management cluster.
+	cTo, err := o.fromProxy.NewClient()
 	if err != nil {
 		return err
 	}

@@ -79,3 +79,87 @@ func (c *clusterctlClient) Move(options MoveOptions) error {
 
 	return nil
 }
+
+func (c *clusterctlClient) Save(options MoveOptions) error {
+	// Get the client for interacting with the source management cluster.
+	fromCluster, err := c.clusterClientFactory(ClusterClientFactoryInput{Kubeconfig: options.FromKubeconfig})
+	if err != nil {
+		return err
+	}
+
+	// Ensures the custom resource definitions required by clusterctl are in place.
+	if err := fromCluster.ProviderInventory().EnsureCustomResourceDefinitions(); err != nil {
+		return err
+	}
+
+	// var toCluster cluster.Client
+	// if !options.DryRun {
+	// 	// Get the client for interacting with the target management cluster.
+	// 	toCluster, err = c.clusterClientFactory(ClusterClientFactoryInput{Kubeconfig: options.ToKubeconfig})
+	// 	if err != nil {
+	// 		return err
+	// 	}
+
+	// 	// Ensures the custom resource definitions required by clusterctl are in place
+	// 	if err := toCluster.ProviderInventory().EnsureCustomResourceDefinitions(); err != nil {
+	// 		return err
+	// 	}
+	// }
+
+	// If the option specifying the Namespace is empty, try to detect it.
+	if options.Namespace == "" {
+		currentNamespace, err := fromCluster.Proxy().CurrentNamespace()
+		if err != nil {
+			return err
+		}
+		options.Namespace = currentNamespace
+	}
+
+	if err := fromCluster.ObjectMover().Save(options.Namespace); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (c *clusterctlClient) Restore(options MoveOptions) error {
+	// Get the client for interacting with the source management cluster.
+	fromCluster, err := c.clusterClientFactory(ClusterClientFactoryInput{Kubeconfig: options.FromKubeconfig})
+	if err != nil {
+		return err
+	}
+
+	// Ensures the custom resource definitions required by clusterctl are in place.
+	if err := fromCluster.ProviderInventory().EnsureCustomResourceDefinitions(); err != nil {
+		return err
+	}
+
+	// var toCluster cluster.Client
+	// if !options.DryRun {
+	// 	// Get the client for interacting with the target management cluster.
+	// 	toCluster, err = c.clusterClientFactory(ClusterClientFactoryInput{Kubeconfig: options.ToKubeconfig})
+	// 	if err != nil {
+	// 		return err
+	// 	}
+
+	// 	// Ensures the custom resource definitions required by clusterctl are in place
+	// 	if err := toCluster.ProviderInventory().EnsureCustomResourceDefinitions(); err != nil {
+	// 		return err
+	// 	}
+	// }
+
+	// If the option specifying the Namespace is empty, try to detect it.
+	if options.Namespace == "" {
+		currentNamespace, err := fromCluster.Proxy().CurrentNamespace()
+		if err != nil {
+			return err
+		}
+		options.Namespace = currentNamespace
+	}
+
+	if err := fromCluster.ObjectMover().Restore(options.Namespace); err != nil {
+		return err
+	}
+
+	return nil
+}

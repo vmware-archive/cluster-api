@@ -125,3 +125,11 @@ type fakeObjectMover struct {
 func (f *fakeObjectMover) Move(namespace string, toCluster cluster.Client, dryRun bool) error {
 	return f.moveErr
 }
+
+func (f *fakeObjectMover) Save(namespace string) error {
+	return nil
+}
+
+func (f *fakeObjectMover) Restore(namespace string) error {
+	return nil
+}
