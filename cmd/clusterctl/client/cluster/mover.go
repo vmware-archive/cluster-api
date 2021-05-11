@@ -457,7 +457,7 @@ func (o *objectMover) restore(graph *objectGraph) error {
 	log.Info("Creating objects in the target cluster")
 	for groupIndex := 0; groupIndex < len(moveSequence.groups); groupIndex++ {
 		//if err := o.createGroup(moveSequence.getGroup(groupIndex), toProxy); err != nil {
-		if err := o.saveGroup(moveSequence.getGroup(groupIndex)); err != nil {
+		if err := o.restoreGroup(moveSequence.getGroup(groupIndex)); err != nil {
 			return err
 		}
 	}
