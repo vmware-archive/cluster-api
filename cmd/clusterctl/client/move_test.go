@@ -130,6 +130,6 @@ func (f *fakeObjectMover) Save(namespace string) error {
 	return nil
 }
 
-func (f *fakeObjectMover) Restore(namespace string) error {
+func (f *fakeObjectMover) Restore(namespace string, glob string) error {
 	return nil
 }

@@ -21,6 +21,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"regexp"
 
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
@@ -33,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/version"
 	clusterv1 "sigs.k8s.io/cluster-api/api/v1alpha3"
 	logf "sigs.k8s.io/cluster-api/cmd/clusterctl/log"
+	"sigs.k8s.io/cluster-api/util/yaml"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -43,7 +45,7 @@ type ObjectMover interface {
 	// Save saves all the Cluster API objects existing in a namespace (or from all the namespaces if empty) to a target management cluster.
 	Save(namespace string) error
 	// Restore restores all the Cluster API objects existing in a namespace (or from all the namespaces if empty) to a target management cluster.
-	Restore(namespace string) error
+	Restore(namespace string, glob string) error
 }
 
 // objectMover implements the ObjectMover interface.
@@ -113,7 +115,7 @@ func (o *objectMover) Save(namespace string) error {
 	return nil
 }
 
-func (o *objectMover) Restore(namespace string) error {
+func (o *objectMover) Restore(namespace string, glob string) error {
 	log := logf.Log
 	log.Info("Performing restore...")
 	// o.dryRun = dryRun
@@ -125,6 +127,126 @@ func (o *objectMover) Restore(namespace string) error {
 
 	objectGraph := newObjectGraph(o.fromProxy)
 
+	// -----------------------------------------------------------------
+	// 1. Rebuild / restore objectgraph from files (based on tag / glob)
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+
+	directoryBin := filepath.Join(homeDir, ".tanzu", "tce", "objects")
+	err = os.MkdirAll(directoryBin, 0755)
+	if err != nil {
+		return err
+	}
+
+	objectsMatcher := regexp.MustCompile(`^.*` + glob + `.*`)
+
+	files, err := filepath.Glob(directoryBin + "/*")
+	if err != nil {
+		return err
+	}
+
+	var rawYamls [][]byte
+	for _, objectFile := range files {
+		if objectsMatcher.MatchString(objectFile) {
+			fmt.Printf("filenameObj: %v\n", objectFile)
+			byObj, err := ioutil.ReadFile(objectFile)
+			if err != nil {
+				return err
+			}
+
+			rawYamls = append(rawYamls, byObj)
+		}
+	}
+
+	// fmt.Printf("rawYamls: %s\n", rawYamls)
+
+	processedYamls := yaml.JoinYaml(rawYamls...)
+	// fmt.Printf("processedYamls: %s\n", processedYamls)
+
+	objs, err := yaml.ToUnstructured(processedYamls)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("objs: %v\n", objs)
+
+	//obj := &unstructured.Unstructured{}
+	//err = obj.UnmarshalJSON(byObj)
+	//if err != nil {
+	//return err
+	//}
+
+	for _, obj := range objs {
+		// New objects cannot have a specified resource version. Clear it out.
+		obj.SetResourceVersion("")
+
+		// Removes current OwnerReferences
+		//obj.SetOwnerReferences(nil)
+
+		objectGraph.addObj(&obj)
+
+		// JPM --- DO WE NEED THIS? TODO
+		//ownerRefs := []metav1.OwnerReference{}
+		//for ownerNode := range nodeToCreate.owners {
+		//ownerRef := metav1.OwnerReference{
+		//APIVersion: ownerNode.identity.APIVersion,
+		//Kind:       ownerNode.identity.Kind,
+		//Name:       ownerNode.identity.Name,
+		//UID:        ownerNode.newUID, // Use the owner's newUID read from the target management cluster (instead of the UID read during discovery).
+
+		//// Restores the attributes of the OwnerReference.
+		//if attributes, ok := nodeToCreate.owners[ownerNode]; ok {
+		//ownerRef.Controller = attributes.Controller
+		//ownerRef.BlockOwnerDeletion = attributes.BlockOwnerDeletion
+		//}
+
+		//ownerRefs = append(ownerRefs, ownerRef)
+		//}
+		//obj.SetOwnerReferences(ownerRefs)
+
+		// Create client to the restoring cluster
+		cTo, err := o.fromProxy.NewClient()
+		if err != nil {
+			return err
+		}
+
+		// Attempt to create using undefined objects ...
+		if err := cTo.Create(ctx, &obj); err != nil {
+			if !apierrors.IsAlreadyExists(err) {
+				return errors.Wrapf(err, "error creating %q %s/%s",
+					obj.GroupVersionKind(), obj.GetNamespace(), obj.GetName())
+			}
+
+			fmt.Printf("Obj already exists!!!")
+			// If the object already exists, try to update it.
+			// Nb. This should not happen, but it is supported to make move more resilient to unexpected interrupt/restarts of the move process.
+			//log.V(5).Info("Object already exists, updating", nodeToCreate.identity.Kind, nodeToCreate.identity.Name, "Namespace", nodeToCreate.identity.Namespace)
+
+			objKey := client.ObjectKey{
+				Namespace: obj.GetNamespace(),
+				Name:      obj.GetName(),
+			}
+
+			// Retrieve the UID and the resource version for the update.
+			existingTargetObj := &unstructured.Unstructured{}
+			existingTargetObj.SetAPIVersion(obj.GetAPIVersion())
+			existingTargetObj.SetKind(obj.GetKind())
+			if err := cTo.Get(ctx, objKey, existingTargetObj); err != nil {
+				return errors.Wrapf(err, "error reading resource for %q %s/%s",
+					existingTargetObj.GroupVersionKind(), existingTargetObj.GetNamespace(), existingTargetObj.GetName())
+			}
+
+			obj.SetUID(existingTargetObj.GetUID())
+			obj.SetResourceVersion(existingTargetObj.GetResourceVersion())
+			if err := cTo.Update(ctx, &obj); err != nil {
+				return errors.Wrapf(err, "error updating %q %s/%s",
+					obj.GroupVersionKind(), obj.GetNamespace(), obj.GetName())
+			}
+		}
+	}
+
 	// checks that all the required providers in place in the target cluster.
 	// if !o.dryRun {
 	// 	if err := o.checkTargetProviders(namespace, toCluster.ProviderInventory()); err != nil {
@@ -132,18 +254,20 @@ func (o *objectMover) Restore(namespace string) error {
 	// 	}
 	// }
 
+	//fmt.Printf("ObjectGraph 1: %v\n", objectGraph)
 	// Gets all the types defines by the CRDs installed by clusterctl plus the ConfigMap/Secret core types.
-	err := objectGraph.getDiscoveryTypes()
-	if err != nil {
-		return err
-	}
+	//err = objectGraph.getDiscoveryTypes()
+	//if err != nil {
+	//return err
+	//}
 
+	//fmt.Printf("ObjectGraph 2: %v\n", objectGraph)
 	// Discovery the object graph for the selected types:
 	// - Nodes are defined the Kubernetes objects (Clusters, Machines etc.) identified during the discovery process.
 	// - Edges are derived by the OwnerReferences between nodes.
-	if err := objectGraph.Discovery(namespace); err != nil {
-		return err
-	}
+	//if err := objectGraph.Discovery(namespace); err != nil {
+	//return err
+	//}
 
 	// Checks if Cluster API has already completed the provisioning of the infrastructure for the objects involved in the move operation.
 	// This is required because if the infrastructure is provisioned, then we can reasonably assume that the objects we are moving are
@@ -153,8 +277,9 @@ func (o *objectMover) Restore(namespace string) error {
 	// 	return err
 	// }
 
+	//fmt.Printf("ObjectGraph 3: %v\n", objectGraph)
 	// Check whether nodes are not included in GVK considered for move
-	objectGraph.checkVirtualNode()
+	//objectGraph.checkVirtualNode()
 
 	// Move the objects to the target cluster.
 	// var proxy Proxy
@@ -162,10 +287,12 @@ func (o *objectMover) Restore(namespace string) error {
 	// 	proxy = toCluster.Proxy()
 	// }
 
-	//if err := o.move(objectGraph, proxy); err != nil {
-	if err := o.restore(objectGraph); err != nil {
-		return err
-	}
+	//fmt.Printf("ObjectGraph before move: %v\n", objectGraph)
+	//fmt.Printf("proxy: %v\n", o.fromProxy)
+	//if err := o.restore(objectGraph, o.fromProxy); err != nil {
+	//fmt.Printf("Restore error: %v\n", err)
+	//return err
+	//}
 
 	return nil
 }

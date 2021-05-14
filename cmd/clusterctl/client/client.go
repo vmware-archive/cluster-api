@@ -54,7 +54,7 @@ type Client interface {
 	Save(options MoveOptions) error
 
 	// Restore restores all the Cluster API objects existing in a namespace (or from all the namespaces if empty) to a target management cluster.
-	Restore(options MoveOptions) error
+	Restore(options MoveOptions, glob string) error
 
 	// PlanUpgrade returns a set of suggested Upgrade plans for the cluster, and more specifically:
 	// - Each management group gets separated upgrade plans.

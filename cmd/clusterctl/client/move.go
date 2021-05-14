@@ -122,7 +122,7 @@ func (c *clusterctlClient) Save(options MoveOptions) error {
 	return nil
 }
 
-func (c *clusterctlClient) Restore(options MoveOptions) error {
+func (c *clusterctlClient) Restore(options MoveOptions, glob string) error {
 	// Get the client for interacting with the source management cluster.
 	fromCluster, err := c.clusterClientFactory(ClusterClientFactoryInput{Kubeconfig: options.FromKubeconfig})
 	if err != nil {
@@ -157,7 +157,7 @@ func (c *clusterctlClient) Restore(options MoveOptions) error {
 		options.Namespace = currentNamespace
 	}
 
-	if err := fromCluster.ObjectMover().Restore(options.Namespace); err != nil {
+	if err := fromCluster.ObjectMover().Restore(options.Namespace, glob); err != nil {
 		return err
 	}
 
