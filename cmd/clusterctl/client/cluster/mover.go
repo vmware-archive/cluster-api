@@ -511,10 +511,10 @@ func (o *objectMover) save(graph *objectGraph) error {
 	log.Info("Moving Cluster API objects", "Clusters", len(clusters))
 
 	// Sets the pause field on the Cluster object in the source management cluster, so the controllers stop reconciling it.
-	log.V(1).Info("Pausing the source cluster")
-	if err := setClusterPause(o.fromProxy, clusters, true, o.dryRun); err != nil {
-		return err
-	}
+	//log.V(1).Info("Pausing the source cluster")
+	//if err := setClusterPause(o.fromProxy, clusters, true, o.dryRun); err != nil {
+	//return err
+	//}
 
 	// Ensure all the expected target namespaces are in place before creating objects.
 	// log.V(1).Info("Creating target namespaces, if missing")
@@ -547,10 +547,10 @@ func (o *objectMover) save(graph *objectGraph) error {
 	// }
 
 	// Reset the pause field on the Cluster object in the target management cluster, so the controllers start reconciling it.
-	log.V(1).Info("Resuming the source cluster")
-	if err := setClusterPause(o.fromProxy, clusters, false, o.dryRun); err != nil {
-		return err
-	}
+	//log.V(1).Info("Resuming the source cluster")
+	//if err := setClusterPause(o.fromProxy, clusters, false, o.dryRun); err != nil {
+	//return err
+	//}
 
 	return nil
 }
