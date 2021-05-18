@@ -1024,32 +1024,34 @@ func (o *objectMover) saveTargetObject(nodeToCreate *node) error {
 	}
 
 	// New objects cannot have a specified resource version. Clear it out.
-	obj.SetResourceVersion("")
+	// -- JPM - Commented out this section since we _need_ to preserve the UIDs
+	//          in the save functionality
+	//obj.SetResourceVersion("")
 
-	// Removes current OwnerReferences
-	obj.SetOwnerReferences(nil)
+	//// Removes current OwnerReferences
+	//obj.SetOwnerReferences(nil)
 
-	// Recreate all the OwnerReferences using the newUID of the owner nodes.
-	if len(nodeToCreate.owners) > 0 {
-		ownerRefs := []metav1.OwnerReference{}
-		for ownerNode := range nodeToCreate.owners {
-			ownerRef := metav1.OwnerReference{
-				APIVersion: ownerNode.identity.APIVersion,
-				Kind:       ownerNode.identity.Kind,
-				Name:       ownerNode.identity.Name,
-				UID:        ownerNode.newUID, // Use the owner's newUID read from the target management cluster (instead of the UID read during discovery).
-			}
+	//// Recreate all the OwnerReferences using the newUID of the owner nodes.
+	//if len(nodeToCreate.owners) > 0 {
+	//ownerRefs := []metav1.OwnerReference{}
+	//for ownerNode := range nodeToCreate.owners {
+	//ownerRef := metav1.OwnerReference{
+	//APIVersion: ownerNode.identity.APIVersion,
+	//Kind:       ownerNode.identity.Kind,
+	//Name:       ownerNode.identity.Name,
+	//UID:        ownerNode.newUID, // Use the owner's newUID read from the target management cluster (instead of the UID read during discovery).
+	//}
 
-			// Restores the attributes of the OwnerReference.
-			if attributes, ok := nodeToCreate.owners[ownerNode]; ok {
-				ownerRef.Controller = attributes.Controller
-				ownerRef.BlockOwnerDeletion = attributes.BlockOwnerDeletion
-			}
+	//// Restores the attributes of the OwnerReference.
+	//if attributes, ok := nodeToCreate.owners[ownerNode]; ok {
+	//ownerRef.Controller = attributes.Controller
+	//ownerRef.BlockOwnerDeletion = attributes.BlockOwnerDeletion
+	//}
 
-			ownerRefs = append(ownerRefs, ownerRef)
-		}
-		obj.SetOwnerReferences(ownerRefs)
-	}
+	//ownerRefs = append(ownerRefs, ownerRef)
+	//}
+	//obj.SetOwnerReferences(ownerRefs)
+	//}
 
 	byObj, err := obj.MarshalJSON()
 	if err != nil {
