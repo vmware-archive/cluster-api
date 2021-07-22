@@ -51,6 +51,12 @@ type Client interface {
 	Move(options MoveOptions) error
 
 	// PlanUpgrade returns a set of suggested Upgrade plans for the cluster, and more specifically:
+	Save(options SaveOptions) error
+
+	// Restore restores all the Cluster API objects existing in a configured directory based on a glob to a target management cluster.
+	Restore(options RestoreOptions) error
+
+	// PlanUpgrade returns a set of suggested Upgrade plans for the cluster, and more specifically:
 	// - Each management group gets separated upgrade plans.
 	// - For each management group, an upgrade plan is generated for each API Version of Cluster API (contract) available, e.g.
 	//   - Upgrade to the latest version in the the v1alpha2 series: ....
